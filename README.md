@@ -45,11 +45,13 @@ OpenROAD integration validation.
 ## OpenROAD dependency
 
 The core extension is developed separately in
-[isavidis/OpenROAD](https://github.com/isavidis/OpenROAD), branch
-`tsv/native-rc-coupling-upstream`, local reviewed commit
-`19a6ccadfb3a159f39993fa95e5dd087ebcad225`. Publication of that branch has not yet
-been verified. The companion can be prepared independently using the bundled
-patch against upstream commit `b56f3a6a26fcab9c6f86604358ae5ac0a9a28ce1`:
+[drexel-ice/OpenROAD-TSV-fork](https://github.com/drexel-ice/OpenROAD-TSV-fork),
+on the published branch
+[`tsv/native-rc-coupling-upstream`](https://github.com/drexel-ice/OpenROAD-TSV-fork/tree/tsv/native-rc-coupling-upstream).
+The published commit is `4384eba8004bd2e0979df0592479a4c64afe79a4`; it contains
+the reviewed implementation plus the companion documentation link. The companion
+can also be prepared independently using the bundled patch against upstream
+commit `b56f3a6a26fcab9c6f86604358ae5ac0a9a28ce1`:
 
 ```sh
 python3 outputs/openroad_tsv_integration/checkout_openroad.py --destination repos/OpenROAD-pr-ready --ref b56f3a6a26fcab9c6f86604358ae5ac0a9a28ce1
