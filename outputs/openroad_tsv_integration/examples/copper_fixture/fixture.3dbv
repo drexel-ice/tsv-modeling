@@ -1,0 +1,38 @@
+Header:
+  version: 2.5
+  unit: micron
+  precision: 2000
+
+ChipletDef:
+  bottom_chip:
+    type: die
+    design_area: [200, 200]
+    shrink: 1
+    tsv: true
+    thickness: 50
+    offset: [0, 0]
+    regions:
+      terminal_region:
+        side: front
+        coords: [[0, 0], [200, 0], [200, 200], [0, 200]]
+        bmap: pads.bmap
+        layer: M1
+    external:
+      APR_tech_file: [tech.lef]
+      LEF_file: [landing.lef]
+  top_chip:
+    type: die
+    design_area: [200, 200]
+    shrink: 1
+    tsv: true
+    thickness: 50
+    offset: [0, 0]
+    regions:
+      terminal_region:
+        side: back
+        coords: [[0, 0], [200, 0], [200, 200], [0, 200]]
+        bmap: pads.bmap
+        layer: M1
+    external:
+      APR_tech_file: [tech.lef]
+      LEF_file: [landing.lef]

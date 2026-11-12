@@ -1,0 +1,22 @@
+{
+  "source": "OpenROAD_TSV_Integration_Prototype research workspace",
+  "core_base": "b56f3a6a26fcab9c6f86604358ae5ac0a9a28ce1",
+  "core_commit": "19a6ccadfb3a159f39993fa95e5dd087ebcad225",
+  "core_patch_sha256": "3bb8fcd11301794f42e05bc07486c9b7eaab6f1fe352145dce9749256eb8da44",
+  "runtime_source_sha256": {
+    "bridge.py": "4e93c1029a19e5e60afe84a55843684a77d50a7c17a1cbf6b1e15120649dd83b",
+    "tsv_models.py": "6decfe005a8aa76e4bd50287bbae76c0b00014c25d3c0f5f6fc80484b965aea4",
+    "material_models.py": "407cae0de39ab65850855bbe70eb6ecd7170a29e5010332902ba927f43cb3b5d",
+    "native_plan.py": "9084f806fe706305b92c8375437070238af50b7642275387e7c8e36d82712c59",
+    "native_rc.tcl": "b06c3afb7d19bbb1c6437cc8bde57b1b87fba6a483de620a39aef18e6ba54a99",
+    "native_transport.tcl": "590ce843a9ccbae75cb0ee16323fcda8c07ceb13005990e08c12641f1d9af690",
+    "create_native_fixture.tcl": "b3fa05a604ba6056bfa9714c90609cb6ab881d8f61541edc564e9896cd6a5bae",
+    "make_native_fixture.py": "4db13da06c84234369f3cc3055d595941411898117c9273278e30e4b38dc3d62",
+    "run_bridge.py": "3eba22104de1cd5244b8fce5bd22795488df611cb66e54f742d7b7b3731fd5f5",
+    "run_native.py": "f59a22d0f9a88c8c253239ed4aa027449301468522fe1e4a82fa7b804d624e8d",
+    "run_material_examples.py": "2d2bf4da837d7abfb1c3b4dd397107eb12fc628e5b3380c1da4f47bdcb213772",
+    "run_copper_palace.sh": "55b1e18139d41a10daf977e351967a79afec922521640f9eb100bb174a22aa00",
+    "setup_em_macos.sh": "118cae3b3d8f14c819f4dbfc4b2c2c22930473ec3284bf505294b02b26ea333f",
+    "checkout_openroad.py": "67830c920b309bfada6ee9e867598c8a2993a1a388828acd5412001a63f9d4d7"
+  }
+}

@@ -1,0 +1,58 @@
+{
+  "[[\"bottom_die\"],\"TSV_0_bottom\"]": {
+    "key": "[[\"bottom_die\"],\"TSV_0_bottom\"]",
+    "chip_path": [
+      "bottom_die"
+    ],
+    "pad_instance": "TSV_0_bottom",
+    "position_m": [
+      0,
+      0,
+      0
+    ],
+    "net": "signal_0",
+    "source": "synthetic offline fixture"
+  },
+  "[[\"top_die\"],\"TSV_0_top\"]": {
+    "key": "[[\"top_die\"],\"TSV_0_top\"]",
+    "chip_path": [
+      "top_die"
+    ],
+    "pad_instance": "TSV_0_top",
+    "position_m": [
+      0,
+      0,
+      6e-05
+    ],
+    "net": "signal_0",
+    "source": "synthetic offline fixture"
+  },
+  "[[\"bottom_die\"],\"TSV_1_bottom\"]": {
+    "key": "[[\"bottom_die\"],\"TSV_1_bottom\"]",
+    "chip_path": [
+      "bottom_die"
+    ],
+    "pad_instance": "TSV_1_bottom",
+    "position_m": [
+      4e-05,
+      0,
+      0
+    ],
+    "net": "signal_1",
+    "source": "synthetic offline fixture"
+  },
+  "[[\"top_die\"],\"TSV_1_top\"]": {
+    "key": "[[\"top_die\"],\"TSV_1_top\"]",
+    "chip_path": [
+      "top_die"
+    ],
+    "pad_instance": "TSV_1_top",
+    "position_m": [
+      4e-05,
+      0,
+      6e-05
+    ],
+    "net": "signal_1",
+    "source": "synthetic offline fixture"
+  }
+}

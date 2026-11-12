@@ -1,0 +1,1818 @@
+diff --git a/src/dbSta/test/BUILD b/src/dbSta/test/BUILD
+index 528fd3dca9..840f850660 100644
+--- a/src/dbSta/test/BUILD
++++ b/src/dbSta/test/BUILD
+@@ -110,6 +110,7 @@ ALL_TESTS = [
+ ]
+ 
+ PASSFAIL_TESTS = [
++    "3dic_native_caps",
+     "check_ip_liberty_pins",
+     "write_verilog_def_alias",
+     "write_verilog_def_shared_inputs",
+@@ -168,6 +169,10 @@ _3DIC_CROSS_FIXTURES = [
+             "3dic_get_cells": [
+                 "//src/odb/test:regression_resources",
+             ],
++            "3dic_native_caps": _3DIC_CROSS_FIXTURES + [
++                "3dic_spef.a.spef",
++                "3dic_spef.b.spef",
++            ],
+             "3dic_read_db": _3DIC_CROSS_FIXTURES + [
+                 "3dic_read_db_reload.tcl",
+             ],
+diff --git a/src/odb/BUILD b/src/odb/BUILD
+index 5b47ddcbda..2dae85f1af 100644
+--- a/src/odb/BUILD
++++ b/src/odb/BUILD
+@@ -1,6 +1,7 @@
+ # SPDX-License-Identifier: BSD-3-Clause
+ # Copyright (c) 2025-2025, Precision Innovations Inc.
+ 
++load("@rules_python//python:defs.bzl", "py_test")
+ load("//bazel:python_wrap_cc.bzl", "python_wrap_cc", "python_wrap_library")
+ load("//test:regression.bzl", "messages_txt")
+ 
+@@ -121,3 +122,18 @@ python_wrap_library(
+     local_defines = [],
+     deps = ["//src/odb/src/swig:swig_common"],
+ )
++
++py_test(
++    name = "code_generator_test",
++    srcs = glob(["src/codeGenerator/*.py"]),
++    data = [
++        "include/odb/dbObject.h",
++        "src/codeGenerator/schema.json",
++    ] + glob([
++        "src/codeGenerator/schema/**/*.json",
++        "src/codeGenerator/templates/*.jinja",
++    ]),
++    imports = ["src/codeGenerator"],
++    main = "src/codeGenerator/test_all.py",
++    deps = ["@openroad-pip//jinja2"],
++)
+diff --git a/src/odb/include/odb/db.h b/src/odb/include/odb/db.h
+index 99e8582449..c02d1456af 100644
+--- a/src/odb/include/odb/db.h
++++ b/src/odb/include/odb/db.h
+@@ -116,6 +116,7 @@ class dbChip;
+ class dbChipBump;
+ class dbChipBumpInst;
+ class dbChipCapNode;
++class dbChipCCSeg;
+ class dbChipConn;
+ class dbChipInst;
+ class dbChipNet;
+@@ -7344,6 +7345,8 @@ class dbChip : public dbObject
+ 
+   dbSet<dbChipRSeg> getChipRSegs() const;
+ 
++  dbSet<dbChipCCSeg> getChipCCSegs() const;
++
+   dbSet<dbMarkerCategory> getMarkerCategories() const;
+ 
+   dbSet<dbChipPath> getChipPaths() const;
+@@ -7446,6 +7449,7 @@ class dbChipCapNode : public dbObject
+  public:
+   void setCapacitance(float capacitance);
+ 
++  // Ground capacitance in femtofarads.
+   float getCapacitance() const;
+ 
+   // User Code Begin dbChipCapNode
+@@ -7463,6 +7467,23 @@ class dbChipCapNode : public dbObject
+   // User Code End dbChipCapNode
+ };
+ 
++// A two-terminal coupling capacitor between different chip-level nets.
++// Owned by their common chip. Capacitance is in femtofarads.
++class dbChipCCSeg : public dbObject
++{
++ public:
++  // User Code Begin dbChipCCSeg
++  // Capacitance is in femtofarads; RSeg resistance is in ohms.
++  float getCapacitance() const;
++  void setCapacitance(float capacitance);
++  dbChip* getChip() const;
++  dbChipCapNode* getSourceCapNode() const;
++  dbChipCapNode* getTargetCapNode() const;
++  static dbChipCCSeg* create(dbChipCapNode* source, dbChipCapNode* target);
++  static void destroy(dbChipCCSeg* coupling);
++  // User Code End dbChipCCSeg
++};
++
+ class dbChipConn : public dbObject
+ {
+  public:
+@@ -7651,6 +7672,7 @@ class dbChipRSeg : public dbObject
+  public:
+   void setResistance(float resistance);
+ 
++  // Series resistance in ohms.
+   float getResistance() const;
+ 
+   // User Code Begin dbChipRSeg
+diff --git a/src/odb/include/odb/dbCompare.inc b/src/odb/include/odb/dbCompare.inc
+index aaa1d2dd6e..48ae3774e4 100644
+--- a/src/odb/include/odb/dbCompare.inc
++++ b/src/odb/include/odb/dbCompare.inc
+@@ -333,6 +333,13 @@ struct less<odb::dbChipCapNode*>
+                   const odb::dbChipCapNode* rhs) const = delete;
+ };
+ 
++template <>
++struct less<odb::dbChipCCSeg*>
++{
++  bool operator()(const odb::dbChipCCSeg* lhs,
++                  const odb::dbChipCCSeg* rhs) const = delete;
++};
++
+ template <>
+ struct less<odb::dbChipConn*>
+ {
+diff --git a/src/odb/include/odb/dbObject.h b/src/odb/include/odb/dbObject.h
+index 806b7cd2f5..74b7c1fa75 100644
+--- a/src/odb/include/odb/dbObject.h
++++ b/src/odb/include/odb/dbObject.h
+@@ -161,7 +161,10 @@ enum dbObjectType
+   dbTechViaLayerRuleObj,
+ 
+   // Property
+-  dbNameObj
++  dbNameObj,
++  // Generator Code Begin AppendedObjectTypes
++  dbChipCCSegObj,
++  // Generator Code End AppendedObjectTypes
+ };
+ 
+ class dbDatabase;
+diff --git a/src/odb/src/codeGenerator/README.md b/src/odb/src/codeGenerator/README.md
+index d180afa2fd..fbad1cf519 100644
+--- a/src/odb/src/codeGenerator/README.md
++++ b/src/odb/src/codeGenerator/README.md
+@@ -124,6 +124,15 @@ The set of accepted keys is exactly the dataclass fields in
+ `schema_models.py`; an unknown key raises a `ValueError` naming the offending
+ key. When adding a feature, add the key to the dataclass first.
+ 
++### Stable object-type ordinals
++
++`object_type_order` defaults to zero for the original alphabetically ordered
++classes. New persistent object types must use the next unused positive rank;
++`dbChipCCSeg` reserves rank 1. The object-type enum and name array order by this
++rank after the legacy alphabetical group. This preserves ordinals stored inside
++property flags, access-point via references, and marker sources. Stable type
++hashes alone do not preserve those embedded ordinals.
++
+ ### Fields
+ 
+ A field describes one member of the private `_dbFoo` storage class and the
+diff --git a/src/odb/src/codeGenerator/gen.py b/src/odb/src/codeGenerator/gen.py
+index ff83c83dc6..6a43d3647a 100755
+--- a/src/odb/src/codeGenerator/gen.py
++++ b/src/odb/src/codeGenerator/gen.py
+@@ -403,6 +403,15 @@ class ODBGenerator:
+ 
+     def process_schema(self, schema: Schema) -> None:
+         """Derive all generated attributes on the schema's classes and fields."""
++        ranks = set()
++        for klass in schema.classes:
++            rank = klass.object_type_order
++            if isinstance(rank, bool) or not isinstance(rank, int) or rank < 0:
++                raise ValueError("object_type_order must be a nonnegative integer")
++            if rank and rank in ranks:
++                raise ValueError("positive object_type_order ranks must be unique")
++            if rank:
++                ranks.add(rank)
+         generate_relations(schema)
+ 
+         # All enum type names (schema-declared + external) used to keep enums
+diff --git a/src/odb/src/codeGenerator/schema.json b/src/odb/src/codeGenerator/schema.json
+index dc9baef2eb..324a0a1753 100644
+--- a/src/odb/src/codeGenerator/schema.json
++++ b/src/odb/src/codeGenerator/schema.json
+@@ -526,6 +526,13 @@
+       "schema":"kSchemaChipParasitics",
+       "tbl_name":"chip_r_seg_tbl_"
+     },
++    {
++      "parent":"dbChip",
++      "child":"dbChipCCSeg",
++      "type":"1_n",
++      "schema":"kSchemaChipCoupling",
++      "tbl_name":"chip_cc_seg_tbl_"
++    },
+     {
+       "parent":"dbChip",
+       "child":"dbMarkerCategory",
+diff --git a/src/odb/src/codeGenerator/schema/chip/dbChipCapNode.json b/src/odb/src/codeGenerator/schema/chip/dbChipCapNode.json
+index d9ccbf5757..71c0e527bd 100644
+--- a/src/odb/src/codeGenerator/schema/chip/dbChipCapNode.json
++++ b/src/odb/src/codeGenerator/schema/chip/dbChipCapNode.json
+@@ -34,7 +34,8 @@
+         {
+             "name": "capacitance_",
+             "type": "float",
+-            "default": "0.0"
++            "default": "0.0",
++            "public_comment": "// Ground capacitance in femtofarads."
+         }
+     ],
+     "h_includes": [
+@@ -46,5 +47,8 @@
+         "dbChipBumpInst.h",
+         "dbDatabase.h",
+         "dbTable.h"
++    ],
++    "cpp_sys_includes": [
++        "vector"
+     ]
+-}
+\ No newline at end of file
++}
+diff --git a/src/odb/src/codeGenerator/schema/chip/dbChipRSeg.json b/src/odb/src/codeGenerator/schema/chip/dbChipRSeg.json
+index 36c7b02a88..bff66b75e4 100644
+--- a/src/odb/src/codeGenerator/schema/chip/dbChipRSeg.json
++++ b/src/odb/src/codeGenerator/schema/chip/dbChipRSeg.json
+@@ -40,7 +40,8 @@
+         {
+             "name": "resistance_",
+             "type": "float",
+-            "default": "0.0"
++            "default": "0.0",
++            "public_comment": "// Series resistance in ohms."
+         }
+     ],
+     "h_includes": [
+diff --git a/src/odb/src/codeGenerator/schema_models.py b/src/odb/src/codeGenerator/schema_models.py
+index 2d4fd0d2ee..4dc2048dbe 100644
+--- a/src/odb/src/codeGenerator/schema_models.py
++++ b/src/odb/src/codeGenerator/schema_models.py
+@@ -152,6 +152,8 @@ class Class:
+     description: list[str] = dataclass_field(default_factory=list)
+     do_not_generate_compare: bool = False
+     hash: str | None = None
++    # Nonzero ranks append new object types without shifting persisted ordinals.
++    object_type_order: int = 0
+     hasTables: bool = False
+     hasBitFields: bool = False
+     needs_non_default_destructor: bool = False
+diff --git a/src/odb/src/codeGenerator/templates/dbObject.cpp.jinja b/src/odb/src/codeGenerator/templates/dbObject.cpp.jinja
+index 85fab1b99a..3a1984d904 100644
+--- a/src/odb/src/codeGenerator/templates/dbObject.cpp.jinja
++++ b/src/odb/src/codeGenerator/templates/dbObject.cpp.jinja
+@@ -1,17 +1,23 @@
+ //Generator Code Begin ObjectNames
+-{% for klass in schema.classes|sort(attribute='name') %}
++{% for klass in schema.classes|selectattr('object_type_order', 'equalto', 0)|sort(attribute='name') %}
+   "{{klass.name}}",
+ {% endfor %}
+ //Generator Code End ObjectNames
+ 
+ //Generator Code Begin HashToObjectType
+-{% for klass in schema.classes|sort(attribute='name') %}
++{% for klass in schema.classes|sort(attribute='name')|sort(attribute='object_type_order') %}
+   { {{klass.hash}}, {{klass.name}}Obj},
+ {% endfor %}
+ //Generator Code End HashToObjectType
+ 
+ //Generator Code Begin ObjectTypeToHash
+-{% for klass in schema.classes|sort(attribute='name') %}
++{% for klass in schema.classes|sort(attribute='name')|sort(attribute='object_type_order') %}
+   { {{klass.name}}Obj, {{klass.hash}} },
+ {% endfor %}
+ //Generator Code End ObjectTypeToHash
++
++//Generator Code Begin AppendedObjectNames
++{% for klass in schema.classes|rejectattr('object_type_order', 'equalto', 0)|sort(attribute='object_type_order') %}
++  "{{klass.name}}",
++{% endfor %}
++//Generator Code End AppendedObjectNames
+diff --git a/src/odb/src/codeGenerator/templates/dbObject.h.jinja b/src/odb/src/codeGenerator/templates/dbObject.h.jinja
+index 64f4672548..a33f8371ab 100644
+--- a/src/odb/src/codeGenerator/templates/dbObject.h.jinja
++++ b/src/odb/src/codeGenerator/templates/dbObject.h.jinja
+@@ -1,5 +1,11 @@
+ //Generator Code Begin DbObjectType
+-{% for klass in schema.classes|sort(attribute='name') %}
++{% for klass in schema.classes|selectattr('object_type_order', 'equalto', 0)|sort(attribute='name') %}
+   {{klass.name}}Obj,
+ {% endfor %}
+ //Generator Code End DbObjectType
++
++//Generator Code Begin AppendedObjectTypes
++{% for klass in schema.classes|rejectattr('object_type_order', 'equalto', 0)|sort(attribute='object_type_order') %}
++  {{klass.name}}Obj,
++{% endfor %}
++//Generator Code End AppendedObjectTypes
+diff --git a/src/odb/src/codeGenerator/test_generator_snapshot.py b/src/odb/src/codeGenerator/test_generator_snapshot.py
+index 0a3cd84cee..985fd6872c 100644
+--- a/src/odb/src/codeGenerator/test_generator_snapshot.py
++++ b/src/odb/src/codeGenerator/test_generator_snapshot.py
+@@ -13,6 +13,8 @@ Run with:  python3 -m unittest test_generator_snapshot
+ """
+ 
+ import os
++import re
++import hashlib
+ import unittest
+ from pathlib import Path
+ 
+@@ -47,6 +49,42 @@ class SnapshotTest(unittest.TestCase):
+             line, lines, f"{line!r} not found in rendered {class_name}/{template}"
+         )
+ 
++    def test_new_chip_coupling_type_preserves_legacy_ordinals(self):
++        rendered = self.env.get_template("dbObject.h.jinja").render(schema=self.schema)
++        actual = [
++            line.strip().rstrip(",")
++            for line in rendered.splitlines()
++            if line.strip().endswith("Obj,")
++        ]
++        legacy = sorted(
++            (k.name for k in self.schema.classes if k.name != "dbChipCCSeg"),
++            key=str.lower,
++        )
++        self.assertEqual(actual[:-1], [name + "Obj" for name in legacy])
++        self.assertEqual(actual[-1], "dbChipCCSegObj")
++        names = self.env.get_template("dbObject.cpp.jinja").render(schema=self.schema)
++        name_block = names.split("//Generator Code End ObjectNames")[0]
++        actual_names = [
++            line.strip().rstrip(",").strip('"')
++            for line in name_block.splitlines()
++            if line.strip().startswith('"')
++        ]
++        self.assertEqual(actual_names, legacy)
++        appended = names.split("//Generator Code Begin AppendedObjectNames")[1]
++        self.assertIn('"dbChipCCSeg",', appended)
++
++    def test_full_object_enum_keeps_every_legacy_ordinal(self):
++        header = (HERE / "../../include/odb/dbObject.h").read_text()
++        block = header.split("enum dbObjectType")[1].split("};")[0]
++        values = re.findall(r"^\s*(db\w+Obj)\s*(?:,|$)", block, re.M)
++        self.assertEqual(values[-1], "dbChipCCSegObj")
++        legacy = "\n".join(values[:-1])
++        # Pin the complete upstream schema-142 sequence, including handwritten types.
++        self.assertEqual(
++            hashlib.sha256(legacy.encode()).hexdigest(),
++            "2801c7ed3ffc68301093e07d8475b4799830630ab9320d56e093452ca3e2a304",
++        )
++
+     # --- char* name_ -> getter returns const char*, freed in destructor ---
+     def test_charptr_getter_and_destructor(self):
+         for klass in ("dbTechLayerCutClassRule", "dbGDSStructure"):
+diff --git a/src/odb/src/db/dbChip.cpp b/src/odb/src/db/dbChip.cpp
+index 03065a6429..99434bb262 100644
+--- a/src/odb/src/db/dbChip.cpp
++++ b/src/odb/src/db/dbChip.cpp
+@@ -11,6 +11,7 @@
+ 
+ #include "dbBlock.h"
+ #include "dbBlockItr.h"
++#include "dbChipCCSeg.h"
+ #include "dbChipCapNode.h"
+ #include "dbChipConn.h"
+ #include "dbChipConnItr.h"
+@@ -127,6 +128,9 @@ bool _dbChip::operator==(const _dbChip& rhs) const
+   if (*chip_r_seg_tbl_ != *rhs.chip_r_seg_tbl_) {
+     return false;
+   }
++  if (*chip_cc_seg_tbl_ != *rhs.chip_cc_seg_tbl_) {
++    return false;
++  }
+   if (*marker_categories_tbl_ != *rhs.marker_categories_tbl_) {
+     return false;
+   }
+@@ -189,6 +193,8 @@ _dbChip::_dbChip(_dbDatabase* db)
+       db, this, (GetObjTbl_t) &_dbChip::getObjectTable, dbChipCapNodeObj);
+   chip_r_seg_tbl_ = new dbTable<_dbChipRSeg>(
+       db, this, (GetObjTbl_t) &_dbChip::getObjectTable, dbChipRSegObj);
++  chip_cc_seg_tbl_ = new dbTable<_dbChipCCSeg>(
++      db, this, (GetObjTbl_t) &_dbChip::getObjectTable, dbChipCCSegObj);
+   marker_categories_tbl_ = new dbTable<_dbMarkerCategory>(
+       db, this, (GetObjTbl_t) &_dbChip::getObjectTable, dbMarkerCategoryObj);
+   chip_path_tbl_ = new dbTable<_dbChipPath>(
+@@ -282,6 +288,9 @@ dbIStream& operator>>(dbIStream& stream, _dbChip& obj)
+   if (obj.getDatabase()->isSchema(kSchemaChipParasitics)) {
+     stream >> *obj.chip_r_seg_tbl_;
+   }
++  if (obj.getDatabase()->isSchema(kSchemaChipCoupling)) {
++    stream >> *obj.chip_cc_seg_tbl_;
++  }
+   if (obj.getDatabase()->isSchema(kSchemaChipMarkerCategories)) {
+     stream >> *obj.marker_categories_tbl_;
+   }
+@@ -344,6 +353,7 @@ dbOStream& operator<<(dbOStream& stream, const _dbChip& obj)
+   stream << *obj.chip_region_tbl_;
+   stream << *obj.chip_cap_node_tbl_;
+   stream << *obj.chip_r_seg_tbl_;
++  stream << *obj.chip_cc_seg_tbl_;
+   stream << *obj.marker_categories_tbl_;
+   // User Code Begin <<
+   stream << *obj.block_tbl_;
+@@ -366,6 +376,8 @@ dbObjectTable* _dbChip::getObjectTable(dbObjectType type)
+       return chip_cap_node_tbl_;
+     case dbChipRSegObj:
+       return chip_r_seg_tbl_;
++    case dbChipCCSegObj:
++      return chip_cc_seg_tbl_;
+     case dbMarkerCategoryObj:
+       return marker_categories_tbl_;
+     case dbChipPathObj:
+@@ -391,6 +403,7 @@ void _dbChip::collectMemInfo(MemInfo& info)
+   chip_region_tbl_->collectMemInfo(info.children["chip_region_tbl_"]);
+   chip_cap_node_tbl_->collectMemInfo(info.children["chip_cap_node_tbl_"]);
+   chip_r_seg_tbl_->collectMemInfo(info.children["chip_r_seg_tbl_"]);
++  chip_cc_seg_tbl_->collectMemInfo(info.children["chip_cc_seg_tbl_"]);
+   marker_categories_tbl_->collectMemInfo(
+       info.children["marker_categories_tbl_"]);
+   chip_path_tbl_->collectMemInfo(info.children["chip_path_tbl_"]);
+@@ -411,6 +424,7 @@ _dbChip::~_dbChip()
+   delete chip_region_tbl_;
+   delete chip_cap_node_tbl_;
+   delete chip_r_seg_tbl_;
++  delete chip_cc_seg_tbl_;
+   delete marker_categories_tbl_;
+   delete chip_path_tbl_;
+   // User Code Begin Destructor
+@@ -640,6 +654,12 @@ dbSet<dbChipRSeg> dbChip::getChipRSegs() const
+   return dbSet<dbChipRSeg>(obj, obj->chip_r_seg_tbl_);
+ }
+ 
++dbSet<dbChipCCSeg> dbChip::getChipCCSegs() const
++{
++  _dbChip* obj = (_dbChip*) this;
++  return dbSet<dbChipCCSeg>(obj, obj->chip_cc_seg_tbl_);
++}
++
+ dbSet<dbMarkerCategory> dbChip::getMarkerCategories() const
+ {
+   _dbChip* obj = (_dbChip*) this;
+diff --git a/src/odb/src/db/dbChip.h b/src/odb/src/db/dbChip.h
+index 181dc0c530..f9006d7efe 100644
+--- a/src/odb/src/db/dbChip.h
++++ b/src/odb/src/db/dbChip.h
+@@ -32,6 +32,7 @@ class _dbProperty;
+ class _dbChipRegion;
+ class _dbChipCapNode;
+ class _dbChipRSeg;
++class _dbChipCCSeg;
+ class _dbMarkerCategory;
+ class _dbChipPath;
+ class _dbBlock;
+@@ -89,6 +90,7 @@ class _dbChip : public _dbObject
+   dbTable<_dbChipRegion>* chip_region_tbl_;
+   dbTable<_dbChipCapNode>* chip_cap_node_tbl_;
+   dbTable<_dbChipRSeg>* chip_r_seg_tbl_;
++  dbTable<_dbChipCCSeg>* chip_cc_seg_tbl_;
+   dbTable<_dbMarkerCategory>* marker_categories_tbl_;
+   dbId<_dbChip> next_entry_;
+   dbTable<_dbChipPath>* chip_path_tbl_;
+diff --git a/src/odb/src/db/dbChipCapNode.cpp b/src/odb/src/db/dbChipCapNode.cpp
+index ea4850ceeb..4918ac545b 100644
+--- a/src/odb/src/db/dbChipCapNode.cpp
++++ b/src/odb/src/db/dbChipCapNode.cpp
+@@ -4,6 +4,8 @@
+ // Generator Code Begin Cpp
+ #include "dbChipCapNode.h"
+ 
++#include <vector>
++
+ #include "dbChip.h"
+ #include "dbChipBumpInst.h"
+ #include "dbChipNet.h"
+@@ -114,6 +116,19 @@ void dbChipCapNode::destroy(dbChipCapNode* chip_cap_node_)
+   _dbDatabase* db = chip->getDatabase();
+   _dbChipNet* chip_net = db->chip_net_tbl_->getPtr(chip_cap_node->chip_net_);
+ 
++  std::vector<dbChipCCSeg*> couplings;
++  for (dbChipCCSeg* coupling :
++       reinterpret_cast<dbChip*>(chip)->getChipCCSegs()) {
++    if (coupling->getSourceCapNode() == chip_cap_node_
++        || coupling->getTargetCapNode() == chip_cap_node_) {
++      couplings.push_back(coupling);
++    }
++  }
++  for (dbChipCCSeg* coupling : couplings) {
++    dbChipCCSeg::destroy(coupling);
++  }
++  dbProperty::destroyProperties(chip_cap_node_);
++
+   // Remove the deleted cap node from the chip net's cap node list
+   if (chip_net->first_cap_node_ == chip_cap_node->getOID()) {
+     chip_net->first_cap_node_ = chip_cap_node->next_chip_net_cap_node_;
+diff --git a/src/odb/src/db/dbChipRSeg.cpp b/src/odb/src/db/dbChipRSeg.cpp
+index f7ab0e6cd8..968d557a4a 100644
+--- a/src/odb/src/db/dbChipRSeg.cpp
++++ b/src/odb/src/db/dbChipRSeg.cpp
+@@ -167,6 +167,7 @@ void dbChipRSeg::destroy(dbChipRSeg* r_seg_)
+     }
+   }
+ 
++  dbProperty::destroyProperties(r_seg_);
+   chip->chip_r_seg_tbl_->destroy(r_seg);
+ }
+ 
+diff --git a/src/odb/src/db/dbDatabase.h b/src/odb/src/db/dbDatabase.h
+index b920118f82..76d29f6295 100644
+--- a/src/odb/src/db/dbDatabase.h
++++ b/src/odb/src/db/dbDatabase.h
+@@ -50,7 +50,10 @@ namespace odb {
+ inline constexpr uint32_t kSchemaMajor = 0;  // Not used...
+ inline constexpr uint32_t kSchemaInitial = 57;
+ 
+-inline constexpr uint32_t kSchemaMinor = 142;  // Current revision number
++inline constexpr uint32_t kSchemaMinor = 143;  // Current revision number
++
++// Revision where chip-level coupling capacitors were added
++inline constexpr uint32_t kSchemaChipCoupling = 143;
+ 
+ // Revision where dbTechLayerCutEnclosureTableDefRule was added
+ inline constexpr uint32_t kSchemaCutEnclosureTableDefRule = 142;
+diff --git a/src/odb/src/db/dbObject.cpp b/src/odb/src/db/dbObject.cpp
+index 5b82a45e9d..7bc79749b8 100644
+--- a/src/odb/src/db/dbObject.cpp
++++ b/src/odb/src/db/dbObject.cpp
+@@ -31,134 +31,139 @@ dbObjectType dbObject::getObjectType() const
+ //
+ // NOTE: The name declaration order MUST match the enumeration order.
+ //
+-static const char* name_tbl[] = {"dbGDSLib",
+-                                 "dbBlock",
+-                                 "dbInstHdr",
+-                                 "dbInst",
+-                                 "dbNet",
+-                                 "dbBTerm",
+-                                 "dbITerm",
+-                                 "dbBox",
+-                                 "dbVia",
+-                                 "dbTrackGrid",
+-                                 "dbObstruction",
+-                                 "dbBlockage",
+-                                 "dbWire",
+-                                 "dbSWire",
+-                                 "dbSBox",
+-                                 "dbCapNode",
+-                                 "dbRSeg",
+-                                 "dbCCSeg",
+-                                 "dbRow",
+-                                 "dbFill",
+-                                 "dbRegion",
+-                                 "dbHier",
+-                                 "dbBPin",
+-                                 // Generator Code Begin ObjectNames
+-                                 "dbAccessPoint",
+-                                 "dbAlignmentMarkerRule",
+-                                 "dbBusPort",
+-                                 "dbCellEdgeSpacing",
+-                                 "dbChip",
+-                                 "dbChipBump",
+-                                 "dbChipBumpInst",
+-                                 "dbChipCapNode",
+-                                 "dbChipConn",
+-                                 "dbChipInst",
+-                                 "dbChipNet",
+-                                 "dbChipPath",
+-                                 "dbChipRegion",
+-                                 "dbChipRegionInst",
+-                                 "dbChipRSeg",
+-                                 "dbDatabase",
+-                                 "dbDft",
+-                                 "dbGCellGrid",
+-                                 "dbGDSARef",
+-                                 "dbGDSBoundary",
+-                                 "dbGDSBox",
+-                                 "dbGDSPath",
+-                                 "dbGDSSRef",
+-                                 "dbGDSStructure",
+-                                 "dbGDSText",
+-                                 "dbGlobalConnect",
+-                                 "dbGroup",
+-                                 "dbGuide",
+-                                 "dbIsolation",
+-                                 "dbLevelShifter",
+-                                 "dbLogicPort",
+-                                 "dbMarker",
+-                                 "dbMarkerCategory",
+-                                 "dbMasterEdgeType",
+-                                 "dbMetalWidthViaMap",
+-                                 "dbModBTerm",
+-                                 "dbModInst",
+-                                 "dbModITerm",
+-                                 "dbModNet",
+-                                 "dbModule",
+-                                 "dbNetTrack",
+-                                 "dbPolygon",
+-                                 "dbPowerDomain",
+-                                 "dbPowerSwitch",
+-                                 "dbProperty",
+-                                 "dbScanChain",
+-                                 "dbScanInst",
+-                                 "dbScanList",
+-                                 "dbScanPartition",
+-                                 "dbScanPin",
+-                                 "dbTechLayer",
+-                                 "dbTechLayerAreaRule",
+-                                 "dbTechLayerArraySpacingRule",
+-                                 "dbTechLayerCornerSpacingRule",
+-                                 "dbTechLayerCutClassRule",
+-                                 "dbTechLayerCutEnclosureRule",
+-                                 "dbTechLayerCutEnclosureTableDefRule",
+-                                 "dbTechLayerCutSpacingRule",
+-                                 "dbTechLayerCutSpacingTableDefRule",
+-                                 "dbTechLayerCutSpacingTableOrthRule",
+-                                 "dbTechLayerEolExtensionRule",
+-                                 "dbTechLayerEolKeepOutRule",
+-                                 "dbTechLayerForbiddenSpacingRule",
+-                                 "dbTechLayerKeepOutZoneRule",
+-                                 "dbTechLayerMaxSpacingRule",
+-                                 "dbTechLayerMinCutRule",
+-                                 "dbTechLayerMinStepRule",
+-                                 "dbTechLayerSpacingEolRule",
+-                                 "dbTechLayerSpacingTablePrlRule",
+-                                 "dbTechLayerTwoWiresForbiddenSpcRule",
+-                                 "dbTechLayerVoltageSpacing",
+-                                 "dbTechLayerWidthTableRule",
+-                                 "dbTechLayerWrongDirSpacingRule",
+-                                 "dbUnfoldedChipBumpInst",
+-                                 "dbUnfoldedChipConn",
+-                                 "dbUnfoldedChipInst",
+-                                 "dbUnfoldedChipNet",
+-                                 "dbUnfoldedChipRegionInst",
+-                                 // Generator Code End ObjectNames
+-
+-                                 // Lib Objects
+-                                 "dbLib",
+-                                 "dbSite",
+-                                 "dbMaster",
+-                                 "dbMPin",
+-                                 "dbMTerm",
+-                                 "dbTechAntennaPinModel",
+-
+-                                 // Tech Objects
+-                                 "dbTech",
+-                                 "dbTechVia",
+-                                 "dbTechNonDefaultRule",
+-                                 "dbTechLayerRule",
+-                                 "dbTechSameNetRule",
+-                                 "dbTechLayerSpacingRule",
+-                                 "dbTechMinCutRule",
+-                                 "dbTechMinEncRule",
+-                                 "dbTechV55InfluenceEntry",
+-                                 "dbTechLayerAntennaRule",
+-                                 "dbTechViaRule",
+-                                 "dbTechViaGenerateRule",
+-                                 "dbTechViaLayerRule",
+-
+-                                 "dbName"};
++static const char* name_tbl[] = {
++    "dbGDSLib",
++    "dbBlock",
++    "dbInstHdr",
++    "dbInst",
++    "dbNet",
++    "dbBTerm",
++    "dbITerm",
++    "dbBox",
++    "dbVia",
++    "dbTrackGrid",
++    "dbObstruction",
++    "dbBlockage",
++    "dbWire",
++    "dbSWire",
++    "dbSBox",
++    "dbCapNode",
++    "dbRSeg",
++    "dbCCSeg",
++    "dbRow",
++    "dbFill",
++    "dbRegion",
++    "dbHier",
++    "dbBPin",
++    // Generator Code Begin ObjectNames
++    "dbAccessPoint",
++    "dbAlignmentMarkerRule",
++    "dbBusPort",
++    "dbCellEdgeSpacing",
++    "dbChip",
++    "dbChipBump",
++    "dbChipBumpInst",
++    "dbChipCapNode",
++    "dbChipConn",
++    "dbChipInst",
++    "dbChipNet",
++    "dbChipPath",
++    "dbChipRegion",
++    "dbChipRegionInst",
++    "dbChipRSeg",
++    "dbDatabase",
++    "dbDft",
++    "dbGCellGrid",
++    "dbGDSARef",
++    "dbGDSBoundary",
++    "dbGDSBox",
++    "dbGDSPath",
++    "dbGDSSRef",
++    "dbGDSStructure",
++    "dbGDSText",
++    "dbGlobalConnect",
++    "dbGroup",
++    "dbGuide",
++    "dbIsolation",
++    "dbLevelShifter",
++    "dbLogicPort",
++    "dbMarker",
++    "dbMarkerCategory",
++    "dbMasterEdgeType",
++    "dbMetalWidthViaMap",
++    "dbModBTerm",
++    "dbModInst",
++    "dbModITerm",
++    "dbModNet",
++    "dbModule",
++    "dbNetTrack",
++    "dbPolygon",
++    "dbPowerDomain",
++    "dbPowerSwitch",
++    "dbProperty",
++    "dbScanChain",
++    "dbScanInst",
++    "dbScanList",
++    "dbScanPartition",
++    "dbScanPin",
++    "dbTechLayer",
++    "dbTechLayerAreaRule",
++    "dbTechLayerArraySpacingRule",
++    "dbTechLayerCornerSpacingRule",
++    "dbTechLayerCutClassRule",
++    "dbTechLayerCutEnclosureRule",
++    "dbTechLayerCutEnclosureTableDefRule",
++    "dbTechLayerCutSpacingRule",
++    "dbTechLayerCutSpacingTableDefRule",
++    "dbTechLayerCutSpacingTableOrthRule",
++    "dbTechLayerEolExtensionRule",
++    "dbTechLayerEolKeepOutRule",
++    "dbTechLayerForbiddenSpacingRule",
++    "dbTechLayerKeepOutZoneRule",
++    "dbTechLayerMaxSpacingRule",
++    "dbTechLayerMinCutRule",
++    "dbTechLayerMinStepRule",
++    "dbTechLayerSpacingEolRule",
++    "dbTechLayerSpacingTablePrlRule",
++    "dbTechLayerTwoWiresForbiddenSpcRule",
++    "dbTechLayerVoltageSpacing",
++    "dbTechLayerWidthTableRule",
++    "dbTechLayerWrongDirSpacingRule",
++    "dbUnfoldedChipBumpInst",
++    "dbUnfoldedChipConn",
++    "dbUnfoldedChipInst",
++    "dbUnfoldedChipNet",
++    "dbUnfoldedChipRegionInst",
++    // Generator Code End ObjectNames
++
++    // Lib Objects
++    "dbLib",
++    "dbSite",
++    "dbMaster",
++    "dbMPin",
++    "dbMTerm",
++    "dbTechAntennaPinModel",
++
++    // Tech Objects
++    "dbTech",
++    "dbTechVia",
++    "dbTechNonDefaultRule",
++    "dbTechLayerRule",
++    "dbTechSameNetRule",
++    "dbTechLayerSpacingRule",
++    "dbTechMinCutRule",
++    "dbTechMinEncRule",
++    "dbTechV55InfluenceEntry",
++    "dbTechLayerAntennaRule",
++    "dbTechViaRule",
++    "dbTechViaGenerateRule",
++    "dbTechViaLayerRule",
++
++    "dbName",
++    // Generator Code Begin AppendedObjectNames
++    "dbChipCCSeg",
++    // Generator Code End AppendedObjectNames
++};
+ 
+ static const std::unordered_map<uint32_t, dbObjectType> hash_to_object_type
+     = {{0x2, dbGdsLibObj},
+@@ -263,6 +268,7 @@ static const std::unordered_map<uint32_t, dbObjectType> hash_to_object_type
+        {0x18591EB8, dbUnfoldedChipInstObj},
+        {0x5650CD93, dbUnfoldedChipNetObj},
+        {0xB0EB213C, dbUnfoldedChipRegionInstObj},
++       {0x3A9B3BB4, dbChipCCSegObj},
+        // Generator Code End HashToObjectType
+ 
+        // Lib Objects
+@@ -394,6 +400,7 @@ static const std::unordered_map<dbObjectType, uint32_t> object_type_to_hash
+        {dbUnfoldedChipInstObj, 0x18591EB8},
+        {dbUnfoldedChipNetObj, 0x5650CD93},
+        {dbUnfoldedChipRegionInstObj, 0xB0EB213C},
++       {dbChipCCSegObj, 0x3A9B3BB4},
+        // Generator Code End ObjectTypeToHash
+ 
+        // Lib Objects
+diff --git a/src/odb/src/swig/common/containers.i b/src/odb/src/swig/common/containers.i
+index 24f60d0955..809dbaedee 100644
+--- a/src/odb/src/swig/common/containers.i
++++ b/src/odb/src/swig/common/containers.i
+@@ -92,4 +92,7 @@ WRAP_DB_CONTAINER(odb::dbUnfoldedChipInst)
+ WRAP_DB_CONTAINER(odb::dbUnfoldedChipRegionInst)
+ WRAP_DB_CONTAINER(odb::dbUnfoldedChipBumpInst)
+ WRAP_DB_CONTAINER(odb::dbUnfoldedChipConn)
+-WRAP_DB_CONTAINER(odb::dbUnfoldedChipNet)
+\ No newline at end of file
++WRAP_DB_CONTAINER(odb::dbUnfoldedChipNet)
++WRAP_DB_CONTAINER(odb::dbChipCapNode)
++WRAP_DB_CONTAINER(odb::dbChipRSeg)
++WRAP_DB_CONTAINER(odb::dbChipCCSeg)
+diff --git a/src/odb/test/BUILD b/src/odb/test/BUILD
+index 0f93a5fa8c..3f1fa66357 100644
+--- a/src/odb/test/BUILD
++++ b/src/odb/test/BUILD
+@@ -8,6 +8,8 @@ load("//test:regression.bzl", "doc_check_test", "regression_test")
+ 
+ package(features = ["layering_check"])
+ 
++exports_files(["data/chip_property_v141.odb"])
++
+ py_library(
+     name = "helper",
+     srcs = [
+diff --git a/src/odb/test/cpp/BUILD b/src/odb/test/cpp/BUILD
+index f357276704..36db6a081e 100644
+--- a/src/odb/test/cpp/BUILD
++++ b/src/odb/test/cpp/BUILD
+@@ -56,6 +56,7 @@ cc_test(
+     srcs = [
+         "TestChips.cpp",
+     ],
++    data = ["//src/odb/test:data/chip_property_v141.odb"],
+     deps = [
+         "//src/odb/src/db",
+         "//src/odb/test/cpp/helper",
+diff --git a/src/odb/test/cpp/TestChips.cpp b/src/odb/test/cpp/TestChips.cpp
+index 6728778589..fec437927b 100644
+--- a/src/odb/test/cpp/TestChips.cpp
++++ b/src/odb/test/cpp/TestChips.cpp
+@@ -2,7 +2,10 @@
+ #include <filesystem>
+ #include <fstream>
+ #include <ios>
++#include <limits>
++#include <memory>
+ #include <set>
++#include <sstream>
+ #include <string>
+ #include <vector>
+ 
+@@ -632,5 +635,101 @@ TEST_F(SimpleDbFixture, test_chip_parasitics_serialization)
+   EXPECT_EQ(r_seg2->getTargetCapNode()->getChipNet(), net2);
+ }
+ 
++TEST_F(SimpleDbFixture, chip_coupling_validates_endpoints_and_values)
++{
++  createSimpleDB();
++  dbChip* chip = db_->getChip();
++  dbChipNet* left = dbChipNet::create(chip, "left");
++  dbChipNet* right = dbChipNet::create(chip, "right");
++  dbChipCapNode* source = dbChipCapNode::create(left);
++  dbChipCapNode* target = dbChipCapNode::create(right);
++  dbChipCCSeg* coupling = dbChipCCSeg::create(source, target);
++  coupling->setCapacitance(3.5F);
++  EXPECT_FLOAT_EQ(coupling->getCapacitance(), 3.5F);
++  EXPECT_EQ(coupling->getSourceCapNode(), source);
++  EXPECT_EQ(coupling->getTargetCapNode(), target);
++  EXPECT_EQ(coupling->getChip(), chip);
++  EXPECT_STREQ(coupling->getTypeName(), "dbChipCCSeg");
++  EXPECT_EQ(chip->getChipCCSegs().size(), 1);
++  EXPECT_EQ(dbChipCCSeg::create(nullptr, target), nullptr);
++  EXPECT_THROW(dbChipCCSeg::create(target, source), std::exception);
++  EXPECT_THROW(dbChipCCSeg::create(source, source), std::exception);
++  EXPECT_THROW(coupling->setCapacitance(-1.0F), std::exception);
++  EXPECT_THROW(coupling->setCapacitance(std::numeric_limits<float>::infinity()),
++               std::exception);
++  EXPECT_THROW(
++      coupling->setCapacitance(std::numeric_limits<float>::quiet_NaN()),
++      std::exception);
++  EXPECT_FLOAT_EQ(coupling->getCapacitance(), 3.5F);
++  dbChip* other = dbChip::create(db_.get(), chip->getTech(), "other");
++  dbChipCapNode* foreign
++      = dbChipCapNode::create(dbChipNet::create(other, "foreign"));
++  EXPECT_THROW(dbChipCCSeg::create(source, foreign), std::exception);
++}
++
++TEST_F(SimpleDbFixture, chip_coupling_is_removed_with_either_endpoint)
++{
++  createSimpleDB();
++  dbChip* chip = db_->getChip();
++  dbChipNet* left = dbChipNet::create(chip, "left");
++  dbChipNet* right = dbChipNet::create(chip, "right");
++  dbChipCapNode* source = dbChipCapNode::create(left);
++  dbChipCapNode* target = dbChipCapNode::create(right);
++  dbChipCCSeg* coupling = dbChipCCSeg::create(source, target);
++  dbStringProperty::create(coupling, "owner", "test");
++  dbChipCapNode::destroy(target);
++  EXPECT_EQ(chip->getChipCCSegs().size(), 0);
++  target = dbChipCapNode::create(right);
++  dbChipCCSeg::create(source, target);
++  dbChipNet::destroy(left);
++  EXPECT_EQ(chip->getChipCCSegs().size(), 0);
++  EXPECT_EQ(right->getChipCapNodes().size(), 1);
++}
++
++TEST_F(SimpleDbFixture, chip_coupling_survives_database_roundtrip)
++{
++  createSimpleDB();
++  dbChip* chip = db_->getChip();
++  dbChipCapNode* source
++      = dbChipCapNode::create(dbChipNet::create(chip, "left"));
++  dbChipCapNode* target
++      = dbChipCapNode::create(dbChipNet::create(chip, "right"));
++  dbChipCCSeg* coupling = dbChipCCSeg::create(source, target);
++  coupling->setCapacitance(5.25F);
++  dbStringProperty::create(coupling, "owner", "test");
++  std::stringstream stream(std::ios::in | std::ios::out | std::ios::binary);
++  db_->write(stream);
++  stream.seekg(0);
++  std::unique_ptr<dbDatabase, decltype(&dbDatabase::destroy)> restored(
++      dbDatabase::create(), dbDatabase::destroy);
++  restored->read(stream);
++  dbChip* chip2 = restored->getChip();
++  ASSERT_EQ(chip2->getChipCCSegs().size(), 1);
++  dbChipCCSeg* copy = *chip2->getChipCCSegs().begin();
++  EXPECT_FLOAT_EQ(copy->getCapacitance(), 5.25F);
++  EXPECT_EQ(copy->getSourceCapNode()->getChipNet(), chip2->findChipNet("left"));
++  EXPECT_EQ(copy->getTargetCapNode()->getChipNet(),
++            chip2->findChipNet("right"));
++  ASSERT_NE(dbStringProperty::find(copy, "owner"), nullptr);
++  EXPECT_EQ(dbStringProperty::find(copy, "owner")->getValue(), "test");
++  EXPECT_EQ(dbStringProperty::find(copy, "owner")->getPropOwner(), copy);
++}
++
++TEST_F(SimpleDbFixture, reads_schema_141_chip_net_property_owner)
++{
++  const std::string file
++      = tst::getRunfilePath("_main/src/odb/test/data/chip_property_v141.odb");
++  std::ifstream input(file, std::ios::binary);
++  ASSERT_TRUE(input.is_open());
++  db_->read(input);
++  dbChipNet* net = db_->getChip()->findChipNet("legacy_net");
++  ASSERT_NE(net, nullptr);
++  dbStringProperty* property = dbStringProperty::find(net, "owner");
++  ASSERT_NE(property, nullptr);
++  EXPECT_EQ(property->getValue(), "legacy_schema_141");
++  EXPECT_EQ(property->getPropOwner(), net);
++  EXPECT_EQ(db_->getChip()->getChipCCSegs().size(), 0);
++}
++
+ }  // namespace
+ }  // namespace odb
+diff --git a/src/rcx/README.md b/src/rcx/README.md
+index c500d34e10..b2d0e5a45e 100644
+--- a/src/rcx/README.md
++++ b/src/rcx/README.md
+@@ -116,6 +116,10 @@ extract_parasitics
+ 
+ ### Write SPEF
+ 
++With `-assembly_only`, write only the chip-level bond SPEF of a 3D assembly.
++This supports native R, ground C, and coupling C without requiring per-die
++extraction data. Net and coordinate filters are not accepted with this flag.
++
+ The `write_spef` command writes the `.spef` output of the parasitics stored
+ in the database.
+ 
+@@ -125,6 +129,7 @@ additional file with the inter-chip parasitics (`design.bonds.spef`).
+ 
+ ```tcl
+ write_spef
++    [-assembly_only]
+     [-net_id net_id]                
+     [-nets nets]
+     [-coordinates]
+@@ -135,6 +140,7 @@ write_spef
+ 
+ | Switch Name | Description |
+ | ----- | ----- |
++| `-assembly_only` | Write only the bond SPEF of a 3D assembly, including ground and coupling capacitance. |
+ | `-net_id` | Output the parasitics info for specific net IDs. |
+ | `-nets` | Net name. |
+ | `coordinates` | Coordinates TBC. |
+diff --git a/src/rcx/include/rcx/ext_options.h b/src/rcx/include/rcx/ext_options.h
+index 64c4764abc..2627edfbc8 100644
+--- a/src/rcx/include/rcx/ext_options.h
++++ b/src/rcx/include/rcx/ext_options.h
+@@ -90,6 +90,7 @@ struct SpefOptions
+   const char* cap_units = "PF";
+   const char* res_units = "OHM";
+   bool coordinates = false;
++  bool assembly_only = false;
+ };
+ 
+ struct ReadSpefOpts
+diff --git a/src/rcx/src/OpenRCX.tcl b/src/rcx/src/OpenRCX.tcl
+index 4e05af52e2..31eef42d2e 100644
+--- a/src/rcx/src/OpenRCX.tcl
++++ b/src/rcx/src/OpenRCX.tcl
+@@ -183,12 +183,13 @@ sta::define_cmd_args "write_spef" {
+   [-net_id net_id]
+   [-nets nets]
+   [-coordinates]
++  [-assembly_only]
+   filename }
+ 
+ proc write_spef { args } {
+   sta::parse_key_args "write_spef" args \
+     keys { -net_id -nets } \
+-    flags { -coordinates }
++    flags { -coordinates -assembly_only }
+   sta::check_argc_eq1 "write_spef" $args
+ 
+   set spef_file $args
+@@ -205,7 +206,7 @@ proc write_spef { args } {
+ 
+   set coordinates [info exists flags(-coordinates)]
+ 
+-  rcx::write_spef $spef_file $nets $net_id $coordinates
++  rcx::write_spef $spef_file $nets $net_id $coordinates [info exists flags(-assembly_only)]
+ }
+ 
+ sta::define_cmd_args "adjust_rc" {
+diff --git a/src/rcx/src/ext-py.i b/src/rcx/src/ext-py.i
+index a7302a391f..68713f4ce5 100644
+--- a/src/rcx/src/ext-py.i
++++ b/src/rcx/src/ext-py.i
+@@ -41,7 +41,8 @@ void
+ write_spef(const char* file,
+            const char* nets,
+            int net_id,
+-           bool coordinates);
++           bool coordinates,
++           bool assembly_only = false);
+            
+ void adjust_rc(double res_factor,
+                double cc_factor,
+diff --git a/src/rcx/src/ext.i b/src/rcx/src/ext.i
+index d05b400cfe..41e8102d76 100644
+--- a/src/rcx/src/ext.i
++++ b/src/rcx/src/ext.i
+@@ -145,7 +145,8 @@ void
+ write_spef(const char* file,
+            const char* nets,
+            int net_id,
+-           bool coordinates)
++           bool coordinates,
++           bool assembly_only = false)
+ {
+   Ext* ext = getOpenRCX();
+ 
+@@ -156,6 +157,7 @@ write_spef(const char* file,
+   opts.nets = nets;
+   opts.net_id = net_id;
+   opts.coordinates= coordinates;
++  opts.assembly_only = assembly_only;
+   if (coordinates) {
+     opts.N = "Y";
+   }
+@@ -165,6 +167,14 @@ write_spef(const char* file,
+     getLogger()->error(utl::RCX, 518, "No design is loaded.");
+   }
+ 
++  if (assembly_only && top_chip->getChipType() != odb::dbChip::ChipType::HIER) {
++    getLogger()->error(utl::RCX, 6100, "Assembly-only SPEF requires a 3D assembly.");
++  }
++  if (assembly_only && (net_id != 0 || (nets != nullptr && nets[0] != '\0')
++                        || coordinates)) {
++    getLogger()->error(utl::RCX, 6101,
++                      "Assembly-only SPEF does not accept net or coordinate filters.");
++  }
+   if (top_chip->getChipType() == odb::dbChip::ChipType::HIER) {
+     ext->writeMultiChipSpef(opts);
+     return;
+diff --git a/src/rcx/src/multiChipSpefWriter.cpp b/src/rcx/src/multiChipSpefWriter.cpp
+index 48d5497eda..3ae236336e 100644
+--- a/src/rcx/src/multiChipSpefWriter.cpp
++++ b/src/rcx/src/multiChipSpefWriter.cpp
+@@ -5,6 +5,8 @@
+ 
+ #include <cstdint>
+ #include <fstream>
++#include <iomanip>
++#include <limits>
+ #include <memory>
+ #include <sstream>
+ #include <string>
+@@ -31,8 +33,17 @@ std::string stripSuffix(const std::string& target, const std::string& suffix)
+ odb::dbITerm* findBumpTerminal(odb::dbChipCapNode* cap_node,
+                                utl::Logger* logger)
+ {
++  odb::dbChipBumpInst* const bump_inst = cap_node->getChipBumpInst();
++  if (bump_inst == nullptr) {
++    logger->error(utl::RCX,
++                  6102,
++                  "Inter-chip net {} has capacitance node {} without a bump "
++                  "instance; cannot write its SPEF node.",
++                  cap_node->getChipNet()->getName(),
++                  cap_node->getId());
++  }
+   odb::dbITerm* bump_terminal = nullptr;
+-  odb::dbChipBump* chip_bump = cap_node->getChipBumpInst()->getChipBump();
++  odb::dbChipBump* chip_bump = bump_inst->getChipBump();
+   odb::dbNet* net = chip_bump->getNet();
+ 
+   if (net) {
+@@ -91,7 +102,8 @@ void MultiChipSpefWriter::run(const SpefOptions& options)
+   setUnits(options);
+ 
+   for (odb::dbChip* chip : db_->getChips()) {
+-    if (chip->getChipType() == odb::dbChip::ChipType::DIE) {
++    if (!options.assembly_only
++        && chip->getChipType() == odb::dbChip::ChipType::DIE) {
+       writeChipSpef(chip, options);
+     }
+   }
+@@ -216,11 +228,22 @@ void MultiChipSpefWriter::writeInterChipSpef()
+ std::string MultiChipSpefWriter::chipNetSpefString(odb::dbChipNet* chip_net)
+ {
+   std::ostringstream out;
++  out << std::setprecision(std::numeric_limits<double>::max_digits10);
+   odb::dbSet<odb::dbChipRSeg> rsegs = chip_net->getChipRSegs();
+ 
+-  if (!rsegs.empty()) {
++  std::vector<odb::dbChipCCSeg*> couplings;
++  double total_capacitance = chip_net->getTotalCapacitance();
++  for (odb::dbChipCCSeg* coupling : chip_net->getChip()->getChipCCSegs()) {
++    if (coupling->getSourceCapNode()->getChipNet() == chip_net
++        || coupling->getTargetCapNode()->getChipNet() == chip_net) {
++      couplings.push_back(coupling);
++      total_capacitance += coupling->getCapacitance();
++    }
++  }
++
++  if (!rsegs.empty() || !chip_net->getChipCapNodes().empty()) {
+     out << "\n*D_NET " << chip_net->getName() << " "
+-        << chip_net->getTotalCapacitance() * scale_factors_.capacitance << "\n";
++        << total_capacitance * scale_factors_.capacitance << "\n";
+ 
+     out << "*CONN\n";
+     for (odb::dbChipCapNode* cap_node : chip_net->getChipCapNodes()) {
+@@ -230,6 +253,27 @@ std::string MultiChipSpefWriter::chipNetSpefString(odb::dbChipNet* chip_net)
+           << pinDirection(bump_terminal) << "\n";
+     }
+ 
++    bool has_capacitance = !couplings.empty();
++    for (odb::dbChipCapNode* node : chip_net->getChipCapNodes()) {
++      has_capacitance |= node->getCapacitance() != 0.0F;
++    }
++    if (has_capacitance) {
++      out << "*CAP\n";
++      int cap_id = 1;
++      for (odb::dbChipCapNode* node : chip_net->getChipCapNodes()) {
++        if (node->getCapacitance() != 0.0F) {
++          out << cap_id++ << " " << bondNodeName(node) << " "
++              << node->getCapacitance() * scale_factors_.capacitance << "\n";
++        }
++      }
++      // Each net lists its incident coupling, as in per-block SPEF output.
++      for (odb::dbChipCCSeg* coupling : couplings) {
++        out << cap_id++ << " " << bondNodeName(coupling->getSourceCapNode())
++            << " " << bondNodeName(coupling->getTargetCapNode()) << " "
++            << coupling->getCapacitance() * scale_factors_.capacitance << "\n";
++      }
++    }
++
+     out << "*RES\n";
+     int res_id = 1;
+     for (odb::dbChipRSeg* rseg : rsegs) {
+diff --git a/src/rcx/test/BUILD b/src/rcx/test/BUILD
+index e6522ceae5..11460da1b5 100644
+--- a/src/rcx/test/BUILD
++++ b/src/rcx/test/BUILD
+@@ -23,6 +23,7 @@ COMPULSORY_TESTS = [
+ ]
+ 
+ PASSFAIL_TESTS = [
++    "chip_caps_api",
+     "test_dielectric_epsilon",
+ ]
+ 
+@@ -126,10 +127,12 @@ cc_test(
+     name = "rcx_unittest",
+     srcs = [
+         "TestExtractor.cpp",
++        "TestMultiChipSpef.cpp",
+         "ext2dBoxTest.cpp",
+     ],
+     deps = [
+         "//src/odb/src/db",
++        "//src/odb/test/cpp/helper",
+         "//src/rcx",
+         "//src/utl",
+         "@googletest//:gtest",
+diff --git a/src/dbSta/test/3dic_native_caps.tcl b/src/dbSta/test/3dic_native_caps.tcl
+new file mode 100644
+index 0000000000..2cb10b5dd4
+--- /dev/null
++++ b/src/dbSta/test/3dic_native_caps.tcl
+@@ -0,0 +1,53 @@
++# Verify native bond ground C reaches cross-die STA through exported SPEF.
++source "helpers.tcl"
++# Use fresh timing sessions: re-reading SPEF after timing has been evaluated
++# can retain a previously reduced parasitic network in the timing cache.
++if { ![info exists ::env(TSV_NATIVE_TEST_CAP_FF)] } {
++  set slacks {}
++  foreach cap {0 50} {
++    set ::env(TSV_NATIVE_TEST_CAP_FF) $cap
++    set output [exec [info nameofexecutable] -no_splash -no_init -exit -threads 1 [info script]]
++    puts $output
++    if { ![regexp {TSV_SLACK=([-+0-9.eE]+)} $output -> slack] } {
++      error "Missing fresh-session timing result"
++    }
++    lappend slacks $slack
++  }
++  unset ::env(TSV_NATIVE_TEST_CAP_FF)
++  lassign $slacks slack0 slack1
++  if { !($slack1 < $slack0 - 0.001) } {
++    error "Native capacitance did not increase cross-die delay: $slack0 -> $slack1"
++  }
++  puts "pass"
++  exit
++}
++read_3dbx 3dic_cross.3dbx
++create_clock -name clk -period 1.0 [get_pins -of_objects [get_nets clk_top]]
++set db [ord::get_db]
++set nodes {}
++foreach unet [$db getUnfoldedChipNets] {
++  set net [$unet getChipNet]
++  if { [$net getName] eq "bridge" } {
++    foreach bump [$unet getConnectedBumps] {
++      set node [odb::dbChipCapNode_create $net]
++      $node setChipBumpInst [$bump getChipBumpInst]
++      lappend nodes $node
++    }
++    odb::dbChipRSeg_create $net [lindex $nodes 0] [lindex $nodes 1]
++    [lindex [$net getChipRSegs] 0] setResistance 2000.0
++  }
++}
++if { [llength $nodes] != 2 } { error "Expected two bridge terminals" }
++proc stitched_slack { base } {
++  read_spef "[file rootname $base].bonds.spef"
++  read_spef -path chipA 3dic_spef.a.spef
++  read_spef -path chipB 3dic_spef.b.spef
++  set paths [find_timing_paths -path_delay max -group_path_count 1]
++  if { [llength $paths] != 1 } { error "Missing stitched timing path" }
++  return [get_property [lindex $paths 0] slack]
++}
++set cap $::env(TSV_NATIVE_TEST_CAP_FF)
++foreach node $nodes { $node setCapacitance $cap }
++set spef [make_result_file "native_c_${cap}.spef"]
++write_spef -assembly_only $spef
++puts "TSV_SLACK=[stitched_slack $spef]"
+diff --git a/src/odb/src/codeGenerator/schema/chip/dbChipCCSeg.json b/src/odb/src/codeGenerator/schema/chip/dbChipCCSeg.json
+new file mode 100644
+index 0000000000..9cd071c2ca
+--- /dev/null
++++ b/src/odb/src/codeGenerator/schema/chip/dbChipCCSeg.json
+@@ -0,0 +1,47 @@
++{
++    "name": "dbChipCCSeg",
++    "type": "dbObject",
++    "description": [
++        "A two-terminal coupling capacitor between different chip-level nets.",
++        "Owned by their common chip. Capacitance is in femtofarads."
++    ],
++    "fields": [
++        {
++            "name": "source_cap_node_",
++            "type": "dbId<_dbChipCapNode>",
++            "flags": [
++                "private"
++            ]
++        },
++        {
++            "name": "target_cap_node_",
++            "type": "dbId<_dbChipCapNode>",
++            "flags": [
++                "private"
++            ]
++        },
++        {
++            "name": "capacitance_",
++            "type": "float",
++            "default": "0.0",
++            "flags": [
++                "private"
++            ]
++        }
++    ],
++    "h_includes": [
++        "odb/dbId.h"
++    ],
++    "cpp_includes": [
++        "dbChip.h",
++        "dbChipCapNode.h",
++        "dbChipNet.h",
++        "dbDatabase.h",
++        "dbTable.h",
++        "utl/Logger.h"
++    ],
++    "cpp_sys_includes": [
++        "cmath"
++    ],
++    "object_type_order": 1
++}
+diff --git a/src/odb/src/codeGenerator/test_all.py b/src/odb/src/codeGenerator/test_all.py
+new file mode 100644
+index 0000000000..04fbd1d507
+--- /dev/null
++++ b/src/odb/src/codeGenerator/test_all.py
+@@ -0,0 +1,15 @@
++# SPDX-License-Identifier: BSD-3-Clause
++# Copyright (c) 2026, The OpenROAD Authors
++"""Run the schema/generator checks as one registered Bazel test target."""
++
++import os
++from pathlib import Path
++import unittest
++
++if __name__ == "__main__":
++    os.chdir(Path(__file__).resolve().parent)
++    suite = unittest.defaultTestLoader.loadTestsFromNames(
++        ["test_schema_validation", "test_field_types", "test_generator_snapshot"]
++    )
++    result = unittest.TextTestRunner(verbosity=2).run(suite)
++    raise SystemExit(not result.wasSuccessful())
+diff --git a/src/odb/src/db/dbChipCCSeg.cpp b/src/odb/src/db/dbChipCCSeg.cpp
+new file mode 100644
+index 0000000000..09d0844e37
+--- /dev/null
++++ b/src/odb/src/db/dbChipCCSeg.cpp
+@@ -0,0 +1,154 @@
++// SPDX-License-Identifier: BSD-3-Clause
++// Copyright (c) 2026, The OpenROAD Authors
++// Generator Code Begin Cpp
++#include "dbChipCCSeg.h"
++
++#include <cmath>
++
++#include "dbChip.h"
++#include "dbChipCapNode.h"
++#include "dbChipNet.h"
++#include "dbCore.h"
++#include "dbDatabase.h"
++#include "dbTable.h"
++#include "odb/db.h"
++#include "utl/Logger.h"
++namespace odb {
++template class dbTable<_dbChipCCSeg>;
++
++bool _dbChipCCSeg::operator==(const _dbChipCCSeg& rhs) const
++{
++  // NOLINTBEGIN(readability-simplify-boolean-expr)
++  if (source_cap_node_ != rhs.source_cap_node_) {
++    return false;
++  }
++  if (target_cap_node_ != rhs.target_cap_node_) {
++    return false;
++  }
++  if (capacitance_ != rhs.capacitance_) {
++    return false;
++  }
++
++  return true;
++  // NOLINTEND(readability-simplify-boolean-expr)
++}
++
++bool _dbChipCCSeg::operator<(const _dbChipCCSeg& rhs) const
++{
++  return true;
++}
++
++_dbChipCCSeg::_dbChipCCSeg(_dbDatabase* db)
++{
++  capacitance_ = 0.0;
++}
++
++dbIStream& operator>>(dbIStream& stream, _dbChipCCSeg& obj)
++{
++  stream >> obj.source_cap_node_;
++  stream >> obj.target_cap_node_;
++  stream >> obj.capacitance_;
++  return stream;
++}
++
++dbOStream& operator<<(dbOStream& stream, const _dbChipCCSeg& obj)
++{
++  stream << obj.source_cap_node_;
++  stream << obj.target_cap_node_;
++  stream << obj.capacitance_;
++  return stream;
++}
++
++void _dbChipCCSeg::collectMemInfo(MemInfo& info)
++{
++  info.cnt++;
++  info.size += sizeof(*this);
++}
++
++////////////////////////////////////////////////////////////////////
++//
++// dbChipCCSeg - Methods
++//
++////////////////////////////////////////////////////////////////////
++
++// User Code Begin dbChipCCSegPublicMethods
++float dbChipCCSeg::getCapacitance() const
++{
++  return reinterpret_cast<const _dbChipCCSeg*>(this)->capacitance_;
++}
++
++void dbChipCCSeg::setCapacitance(const float capacitance)
++{
++  if (!std::isfinite(capacitance) || capacitance < 0.0F) {
++    (reinterpret_cast<_dbChip*>(getChip()))
++        ->getLogger()
++        ->error(utl::ODB,
++                6000,
++                "Chip coupling capacitance must be finite and nonnegative.");
++  }
++  (reinterpret_cast<_dbChipCCSeg*>(this))->capacitance_ = capacitance;
++}
++
++dbChip* dbChipCCSeg::getChip() const
++{
++  return reinterpret_cast<dbChip*>(
++      reinterpret_cast<const _dbChipCCSeg*>(this)->getOwner());
++}
++
++dbChipCapNode* dbChipCCSeg::getSourceCapNode() const
++{
++  const auto* obj = reinterpret_cast<const _dbChipCCSeg*>(this);
++  const auto* chip = reinterpret_cast<_dbChip*>(obj->getOwner());
++  return reinterpret_cast<dbChipCapNode*>(
++      chip->chip_cap_node_tbl_->getPtr(obj->source_cap_node_));
++}
++
++dbChipCapNode* dbChipCCSeg::getTargetCapNode() const
++{
++  const auto* obj = reinterpret_cast<const _dbChipCCSeg*>(this);
++  const auto* chip = reinterpret_cast<_dbChip*>(obj->getOwner());
++  return reinterpret_cast<dbChipCapNode*>(
++      chip->chip_cap_node_tbl_->getPtr(obj->target_cap_node_));
++}
++
++dbChipCCSeg* dbChipCCSeg::create(dbChipCapNode* source, dbChipCapNode* target)
++{
++  if (source == nullptr || target == nullptr) {
++    return nullptr;
++  }
++  dbChip* chip = source->getChipNet()->getChip();
++  auto* impl = reinterpret_cast<_dbChip*>(chip);
++  if (chip != target->getChipNet()->getChip()
++      || source->getChipNet() == target->getChipNet()) {
++    impl->getLogger()->error(
++        utl::ODB,
++        6001,
++        "Chip coupling endpoints must be on different nets of the same chip.");
++  }
++  for (dbChipCCSeg* existing : chip->getChipCCSegs()) {
++    if ((existing->getSourceCapNode() == source
++         && existing->getTargetCapNode() == target)
++        || (existing->getSourceCapNode() == target
++            && existing->getTargetCapNode() == source)) {
++      impl->getLogger()->error(
++          utl::ODB,
++          6002,
++          "A chip coupling capacitor already exists between these endpoints.");
++    }
++  }
++  auto* obj = impl->chip_cc_seg_tbl_->create();
++  obj->source_cap_node_ = source->getImpl()->getOID();
++  obj->target_cap_node_ = target->getImpl()->getOID();
++  return reinterpret_cast<dbChipCCSeg*>(obj);
++}
++
++void dbChipCCSeg::destroy(dbChipCCSeg* coupling)
++{
++  auto* obj = reinterpret_cast<_dbChipCCSeg*>(coupling);
++  auto* chip = reinterpret_cast<_dbChip*>(obj->getOwner());
++  dbProperty::destroyProperties(coupling);
++  chip->chip_cc_seg_tbl_->destroy(obj);
++}
++// User Code End dbChipCCSegPublicMethods
++}  // namespace odb
++// Generator Code End Cpp
+diff --git a/src/odb/src/db/dbChipCCSeg.h b/src/odb/src/db/dbChipCCSeg.h
+new file mode 100644
+index 0000000000..7a2fc011c7
+--- /dev/null
++++ b/src/odb/src/db/dbChipCCSeg.h
+@@ -0,0 +1,35 @@
++// SPDX-License-Identifier: BSD-3-Clause
++// Copyright (c) 2019-2025, The OpenROAD Authors
++
++// Generator Code Begin Header
++#pragma once
++
++#include <cstdint>
++
++#include "dbCore.h"
++#include "odb/dbId.h"
++
++namespace odb {
++class dbIStream;
++class dbOStream;
++class _dbDatabase;
++class _dbChipCapNode;
++
++class _dbChipCCSeg : public _dbObject
++{
++ public:
++  _dbChipCCSeg(_dbDatabase*);
++
++  bool operator==(const _dbChipCCSeg& rhs) const;
++  bool operator!=(const _dbChipCCSeg& rhs) const { return !operator==(rhs); }
++  bool operator<(const _dbChipCCSeg& rhs) const;
++  void collectMemInfo(MemInfo& info);
++
++  dbId<_dbChipCapNode> source_cap_node_;
++  dbId<_dbChipCapNode> target_cap_node_;
++  float capacitance_;
++};
++dbIStream& operator>>(dbIStream& stream, _dbChipCCSeg& obj);
++dbOStream& operator<<(dbOStream& stream, const _dbChipCCSeg& obj);
++}  // namespace odb
++// Generator Code End Header
+\ No newline at end of file
+diff --git a/src/odb/test/data/chip_property_v141.odb b/src/odb/test/data/chip_property_v141.odb
+new file mode 100644
+index 0000000000000000000000000000000000000000..73cf0d5a6bc89f31bae3373c5e4ed5e2850293b3
+GIT binary patch
+literal 4382
+zcmeI!hfWj$6h`5H1$*yZv4Fi}Z&bV3d!a0AMX)Q@C-9v;XI2s+CMJ>?6L*qt_s(G#
+zhneKY&Qn)g+d5ji!tu=)j#BmQk6!)mSfhSXX)>n+m506M;na`%$v95NbH(HMXaDK1
+zj(rNAPx$$YOLI6KxpThHL-omYzbZefJnQY=)x0aI8~KuttN0BQ8HzfIp?HWsRBNWd
+znyIj68myTPYi7WjnXqOSteFjK=D?b{uohQm&3st10A6zz!kR^}W-+W;0&AASnq{zN
+zIjmU$YgWRVRj_6?tZ9HXYhcY<G&rn-HS1wbBdlqHH5*{fMp&~6)@+6~TVTyrShEe*
+zY=<>FV9icg!viX6b~9MB2i7#hn!T`QAFSCAYYxDggRtfhtT_y8j=-9uu;v)7ISy-D
+zU`;EmX+w)cJFMw|HJz~L1gtp;YfizM)3D|YtT_v7&cT}Vu%-*vT!1wfVa+92a~alL
+zfi+iQ%{5qa9oF1{H8)|+Em(6K*4%+LcVW#vSaToNbi<k+Sknt@`q1N0hBf`LrUGjo
+zz?z4!<`JxU3~Qdiny0X40M<N%HG{Bb2-ZA@H7{VzOIY&?*1U!_Z(z+^So03nyoWWz
+zu;v4-`3P%1!J5yo<_oO(3Tts#JxaeZq4?B~m(nDLp?8Co;!3OgtZw83^$f+QCo&Y(
+zPg{%KWUXy1Z$cy1IW%Ft!v<Ju8_S!}iFSt*=x}g1S!)~1n@~a7;Q{&`{@ab^AOAOx
+zUv10L8*)0A^W*<@gO%6S6*=|_i{)r^Io4JtH(|ARV=WpST#joTT#nY-%Je3*p~b=F
+m*y`YNwANOpH=z$b4rTN@xE!tj^U5so=gVW{y?XYKy?zHEfzKWQ
+
+literal 0
+HcmV?d00001
+
+diff --git a/src/rcx/test/TestMultiChipSpef.cpp b/src/rcx/test/TestMultiChipSpef.cpp
+new file mode 100644
+index 0000000000..50ba29547f
+--- /dev/null
++++ b/src/rcx/test/TestMultiChipSpef.cpp
+@@ -0,0 +1,189 @@
++// SPDX-License-Identifier: BSD-3-Clause
++// Copyright (c) 2026, The OpenROAD Authors
++
++#include <filesystem>
++#include <fstream>
++#include <sstream>
++#include <stdexcept>
++#include <string>
++#include <vector>
++
++#include "gtest/gtest.h"
++#include "odb/db.h"
++#include "rcx/ext_options.h"
++#include "rcx/multiChipSpefWriter.h"
++#include "src/odb/test/cpp/helper/helper.h"
++
++namespace rcx {
++namespace {
++
++class MultiChipSpefTest : public odb::SimpleDbFixture
++{
++ protected:
++  void SetUp() override
++  {
++    createSimpleDB();
++    top_ = odb::dbChip::create(
++        db_.get(), nullptr, "assembly", odb::dbChip::ChipType::HIER);
++    db_->setTopChip(top_);
++    auto* tech = odb::dbTech::create(db_.get(), "bond_tech");
++    auto* lib = odb::dbLib::create(db_.get(), "pads", tech, '/');
++    auto* layer = odb::dbTechLayer::create(
++        tech, "pad_layer", odb::dbTechLayerType::MASTERSLICE);
++    auto* master = createMaster1X1(lib, "pad", 100, 100, "in", "out");
++    std::vector<odb::dbChipInst*> placements;
++    std::vector<odb::dbChipRegion*> regions;
++    for (const std::string name : {"a", "b"}) {
++      auto* die = odb::dbChip::create(db_.get(), tech, name);
++      auto* block = odb::dbBlock::create(die, name.c_str());
++      auto* region = odb::dbChipRegion::create(
++          die, "front", odb::dbChipRegion::Side::FRONT, layer);
++      for (const std::string pad_name : {"p0", "p1"}) {
++        auto* inst = odb::dbInst::create(block, master, pad_name.c_str());
++        auto* net = odb::dbNet::create(block, pad_name.c_str());
++        inst->findITerm("in")->connect(net);
++        auto* bump = odb::dbChipBump::create(region, inst);
++        bump->setNet(net);
++        bump->setBTerm(odb::dbBTerm::create(net, pad_name.c_str()));
++      }
++      regions.push_back(region);
++      placements.push_back(odb::dbChipInst::create(top_, die, name));
++    }
++    for (const std::string pad_name : {"p0", "p1"}) {
++      auto* net = odb::dbChipNet::create(top_, pad_name);
++      std::vector<odb::dbChipCapNode*> nodes;
++      for (size_t i = 0; i < placements.size(); ++i) {
++        auto* region = placements[i]->findChipRegionInst(regions[i]);
++        for (auto* bump : region->getChipBumpInsts()) {
++          if (bump->getChipBump()->getInst()->getName() == pad_name) {
++            net->addBumpInst(bump, {placements[i]});
++            auto* node = odb::dbChipCapNode::create(net);
++            node->setChipBumpInst(bump);
++            node->setCapacitance(1.0F);
++            nodes.push_back(node);
++          }
++        }
++      }
++      ASSERT_EQ(nodes.size(), 2);
++      odb::dbChipRSeg::create(net, nodes[0], nodes[1])->setResistance(1.0F);
++      nodes_.push_back(nodes);
++    }
++    for (int i = 0; i < 2; ++i) {
++      odb::dbChipCCSeg::create(nodes_[0][i], nodes_[1][i])
++          ->setCapacitance(0.5F);
++    }
++  }
++
++  void checkExport(const char* cap_unit,
++                   const char* res_unit,
++                   const double cap_scale,
++                   const double res_scale,
++                   const int expected_resistance_count = 2)
++  {
++    const auto base = std::filesystem::path(::testing::TempDir())
++                      / (std::string("chip_caps_") + cap_unit);
++    const std::string filename = base.string() + ".spef";
++    SpefOptions options;
++    options.file = filename.c_str();
++    options.cap_units = cap_unit;
++    options.res_units = res_unit;
++    options.assembly_only = true;
++    MultiChipSpefWriter writer(db_.get(), getLogger(), "IEEE 1481-1998");
++    writer.run(options);
++    std::ifstream input(base.string() + ".bonds.spef");
++    ASSERT_TRUE(input.is_open());
++    std::string line;
++    std::string section;
++    int net_count = 0;
++    int ground_count = 0;
++    int coupling_count = 0;
++    int resistance_count = 0;
++    while (std::getline(input, line)) {
++      std::istringstream record(line);
++      std::vector<std::string> fields;
++      for (std::string field; record >> field;) {
++        fields.push_back(field);
++      }
++      if (fields.empty()) {
++        continue;
++      }
++      if (fields[0] == "*D_NET") {
++        EXPECT_NEAR(std::stod(fields[2]), 3.0 * cap_scale, 1e-9);
++        ++net_count;
++      }
++      if (fields[0][0] == '*') {
++        section = fields[0];
++        continue;
++      }
++      if (section == "*CAP") {
++        if (fields.size() == 3) {
++          EXPECT_NEAR(std::stod(fields[2]), cap_scale, 1e-9);
++          ++ground_count;
++        } else {
++          ASSERT_EQ(fields.size(), 4);
++          EXPECT_NE(fields[1], fields[2]);
++          EXPECT_NEAR(std::stod(fields[3]), 0.5 * cap_scale, 1e-9);
++          ++coupling_count;
++        }
++      }
++      if (section == "*RES") {
++        ASSERT_EQ(fields.size(), 4);
++        EXPECT_NEAR(std::stod(fields[3]), res_scale, 1e-9);
++        ++resistance_count;
++      }
++    }
++    EXPECT_EQ(net_count, 2);
++    EXPECT_EQ(ground_count, 4);
++    EXPECT_EQ(coupling_count, 4);  // Both nets list their incident pair.
++    EXPECT_EQ(resistance_count, expected_resistance_count);
++  }
++
++  odb::dbChip* top_{nullptr};
++  std::vector<std::vector<odb::dbChipCapNode*>> nodes_;
++};
++
++TEST_F(MultiChipSpefTest, exports_ground_and_coupling_in_picofarads)
++{
++  checkExport("PF", "OHM", 0.001, 1.0);
++}
++
++TEST_F(MultiChipSpefTest, exports_femtofarads_and_kilohms)
++{
++  checkExport("FF", "KOHM", 1.0, 0.001);
++}
++
++TEST_F(MultiChipSpefTest, exports_capacitance_only_networks)
++{
++  auto segments = top_->getChipRSegs();
++  while (!segments.empty()) {
++    odb::dbChipRSeg::destroy(*segments.begin());
++  }
++  checkExport("FF", "OHM", 1.0, 1.0, 0);
++}
++
++TEST_F(MultiChipSpefTest, rejects_capacitance_only_node_without_bump)
++{
++  auto* const net = odb::dbChipNet::create(top_, "unbound");
++  auto* const node = odb::dbChipCapNode::create(net);
++  node->setCapacitance(1.0F);
++  ASSERT_EQ(node->getChipBumpInst(), nullptr);
++  ASSERT_TRUE(net->getChipRSegs().empty());
++
++  const std::string filename
++      = (std::filesystem::path(::testing::TempDir()) / "unbound_cap.spef")
++            .string();
++  SpefOptions options;
++  options.file = filename.c_str();
++  options.assembly_only = true;
++  MultiChipSpefWriter writer(db_.get(), getLogger(), "IEEE 1481-1998");
++  try {
++    writer.run(options);
++    FAIL() << "An unbound capacitor must not be silently omitted.";
++  } catch (const std::runtime_error& error) {
++    EXPECT_STREQ(error.what(), "RCX-6102");
++  }
++  EXPECT_FLOAT_EQ(node->getCapacitance(), 1.0F);
++}
++
++}  // namespace
++}  // namespace rcx
+diff --git a/src/rcx/test/chip_caps_api.tcl b/src/rcx/test/chip_caps_api.tcl
+new file mode 100644
+index 0000000000..0def2fb31f
+--- /dev/null
++++ b/src/rcx/test/chip_caps_api.tcl
+@@ -0,0 +1,43 @@
++# Smoke-test chip-level RC collections and assembly-only SPEF Tcl bindings.
++source "helpers.tcl"
++set db [ord::get_db]
++set chip [odb::dbChip_create $db NULL assembly HIER]
++$db setTopChip $chip
++set left [odb::dbChipNet_create $chip left]
++set right [odb::dbChipNet_create $chip right]
++set source [odb::dbChipCapNode_create $left]
++set mid [odb::dbChipCapNode_create $left]
++set target [odb::dbChipCapNode_create $right]
++set resistor [odb::dbChipRSeg_create $left $source $mid]
++$resistor setResistance 1.0
++set coupling [odb::dbChipCCSeg_create $source $target]
++$coupling setCapacitance 1.0
++if {
++  [llength [$chip getChipCCSegs]] != 1 || [llength [$left getChipRSegs]] != 1
++  || [llength [$chip getChipCapNodes]] != 3
++} {
++  error "Native RC collection binding failed"
++}
++odb::dbChipCCSeg_destroy $coupling
++odb::dbChipRSeg_destroy $resistor
++odb::dbChipCapNode_destroy $source
++odb::dbChipCapNode_destroy $mid
++odb::dbChipCapNode_destroy $target
++write_spef -assembly_only [make_result_file empty_assembly.spef]
++set unbound_net [odb::dbChipNet_create $chip unbound]
++set unbound_node [odb::dbChipCapNode_create $unbound_net]
++$unbound_node setCapacitance 1.0
++if {
++  ![catch {
++    write_spef -assembly_only [make_result_file unbound_cap.spef]
++  } message]
++} {
++  error "Expected rejection of a capacitor without a bump reference"
++}
++if { ![string match {*RCX-6102*} $message] } {
++  error "Unexpected unbound capacitor diagnostic: $message"
++}
++if { [$unbound_node getCapacitance] != 1.0 } {
++  error "Failed export changed the stored capacitance"
++}
++puts "pass"

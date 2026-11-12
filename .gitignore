@@ -1,0 +1,7 @@
+__pycache__/
+*.py[cod]
+.DS_Store
+/repos/
+/work/
+/outputs/openroad_tsv_integration/results/
+.venv/

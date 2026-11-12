@@ -1,0 +1,63 @@
+{
+  "model": {
+    "frequency_hz": 0,
+    "ground_convention": "legacy_matlab",
+    "coupling_convention": "matlab_candidate",
+    "allow_unreconciled_capacitance": true,
+    "neighbor_cutoff_m": 0.0001
+  },
+  "tsvs": [
+    {
+      "id": "TSV_0",
+      "kind": "cylindrical_tsv",
+      "endpoints_are_conductor_ends": true,
+      "source": {
+        "chip_path": [
+          "bottom_die"
+        ],
+        "pad_instance": "TSV_0_bottom"
+      },
+      "target": {
+        "chip_path": [
+          "top_die"
+        ],
+        "pad_instance": "TSV_0_top"
+      },
+      "diameter_m": 2e-05,
+      "liner_m": 1e-06,
+      "ground_spacing_m": 1e-05,
+      "ground_reference": "reference_plane_0",
+      "conductor": "tungsten",
+      "substrate": "p_silicon",
+      "acceptors_cm3": 1000000000000000.0,
+      "intrinsic_cm3": 15000000000.0,
+      "temperature_k": 300
+    },
+    {
+      "id": "TSV_1",
+      "kind": "cylindrical_tsv",
+      "endpoints_are_conductor_ends": true,
+      "source": {
+        "chip_path": [
+          "bottom_die"
+        ],
+        "pad_instance": "TSV_1_bottom"
+      },
+      "target": {
+        "chip_path": [
+          "top_die"
+        ],
+        "pad_instance": "TSV_1_top"
+      },
+      "diameter_m": 2e-05,
+      "liner_m": 1e-06,
+      "ground_spacing_m": 1e-05,
+      "ground_reference": "reference_plane_0",
+      "conductor": "tungsten",
+      "substrate": "p_silicon",
+      "acceptors_cm3": 1000000000000000.0,
+      "intrinsic_cm3": 15000000000.0,
+      "temperature_k": 300
+    }
+  ]
+}
