@@ -53,8 +53,7 @@ The core patch contains no Palace/Gmsh dependency and no TSV material equations.
 Those remain companion research code. The companion copper result is a linear,
 lossless dielectric-enclosure benchmark with insulated axial ends. It does not
 establish semiconductor depletion/leakage behavior or process-qualified accuracy.
-The original tungsten equations remain unchanged; the paper's capacitance
-subscript/unit discrepancy remains unresolved.
+The original tungsten equations remain unchanged.
 
 This change stores scalar capacitances and resistance. It does not add native
 inductance, frequency/corner models, automatic TSV extraction, or full crosstalk
