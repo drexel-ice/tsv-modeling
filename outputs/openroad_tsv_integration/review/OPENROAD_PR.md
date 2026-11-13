@@ -56,8 +56,11 @@ establish semiconductor depletion/leakage behavior or process-qualified accuracy
 The original tungsten equations remain unchanged.
 
 This change stores scalar capacitances and resistance. It does not add native
-inductance, frequency/corner models, automatic TSV extraction, or full crosstalk
-STA. Coupling-table scans are retained; indexing for large assemblies is follow-up
+inductance to OpenRoad, frequency/corner models, automatic TSV extraction, or full 
+crosstalk STA. For inductance, The companion tungsten models calculate self and 
+mutual inductance, but this PR integrates only resistance and capacitance into native 
+OpenDB elements and assembly SPEF export. Inductance remains stored as research metadata.  
+Coupling-table scans are retained; indexing for large assemblies is follow-up
 work. Upstream schema 142 is retained; the coupling feature uses revision 143.
 
 The tested original prototype used a private schema-142 layout. Its ODB artifacts
@@ -68,5 +71,6 @@ coupling type.
 
 Unbound capacitance-only nodes now receive RCX-6102 rather than dereferencing a
 missing bump reference. New C++ tests cover rejection and valid capacitor-only
-networks, and the Tcl API regression checks the diagnostic. These tests passed on the rebuilt macOS and Linux targets. Fixed-patch evidence
-is saved in `review/p1_fix_macos_pass/` and `review/p1_fix_linux_pass/`.
+networks, and the Tcl API regression checks the diagnostic. These tests passed on the 
+rebuilt macOS and Linux targets. Fixed-patch evidence is saved in `review/p1_fix_macos_pass/` 
+and `review/p1_fix_linux_pass/`.
